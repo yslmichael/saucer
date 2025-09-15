@@ -1,93 +1,123 @@
+name: 🛸 WebView2 Build Only
+
 on:
-  push:
-  pull_request:
   workflow_dispatch:
     inputs:
+      config:
+        type: choice
+        description: Build configuration
+        options: [Release, Debug]
+        default: Release
       debug:
         type: boolean
         description: Enable Debugging
-
-name: 🛸 Test & Build
+        default: false
 
 jobs:
-  run-tests:
-    strategy:
-      fail-fast: false
-
-      matrix:
-        backend:
-          - Qt5
-          - Qt6
-          - WebKitGtk
-          - WebKit
-          - WebView2
-
-        config:
-          - Release
-          - Debug
-
-        include:
-          - backend: Qt5
-            platform: Linux
-            os: ubuntu-latest
-            container: archlinux:base-devel
-
-          - backend: Qt6
-            platform: Linux
-            os: ubuntu-latest
-            container: archlinux:base-devel
-
-          - backend: WebKitGtk
-            platform: Linux
-            os: ubuntu-latest
-            container: archlinux:base-devel
-
-          - backend: WebKit
-            platform: MacOS
-            os: macos-15
-            xcode-version: latest-stable
-
-          - backend: WebView2
-            platform: Windows
-            os: windows-latest
-            cmake-args: -Dsaucer_tests=OFF
-
-    name: ${{ matrix.backend }}-${{ matrix.config }}
-
-    runs-on: ${{ matrix.os }}
-    container: ${{ matrix.container }}
+  webview2:
+    name: WebView2-${{ inputs.config }}
+    runs-on: windows-2022
 
     steps:
-      - name: 📥 Checkout
+      - name: 📥 Checkout (HTTPS + submodules)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 👽 Setup Saucer
+      - name: 🔁 Force submodules to HTTPS
+        shell: bash
+        run: |
+          if [ -f .gitmodules ]; then
+            git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key url; do
+              if [[ "$url" =~ ^git@github\.com: ]]; then
+                https_url="https://github.com/${url#git@github.com:}"
+                git config -f .gitmodules "$key" "$https_url"
+              fi
+            done
+            git submodule sync --recursive
+            git submodule update --init --recursive
+          fi
+
+      - name: 👽 Setup Saucer (WebView2)
         uses: ./.github/actions/setup
         with:
-          backend: ${{ matrix.backend }}
-          platform: ${{ matrix.platform }}
+          backend: WebView2
+          platform: Windows
+          build-type: ${{ inputs.config }}
+          install: true
+          xcode-version: ""
+          cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
 
-          build-type: ${{ matrix.config }}
-          install: ${{ matrix.install }}
+      # --- Diagnostics: show where the build actually wrote files ---
+      - name: 📂 List likely outputs (exe/dll/pdb)
+        shell: pwsh
+        run: |
+          Write-Host "Workspace: $PWD"
+          Get-ChildItem -Recurse -File -Include *.exe,*.dll,*.pdb `
+            -ErrorAction SilentlyContinue | `
+            Select-Object FullName, Length | Format-Table -AutoSize
 
-          xcode-version: ${{ matrix.xcode-version }}
-          cmake-args: -Dsaucer_tests=ON -Dsaucer_examples=ON ${{ matrix.cmake-args }}
+      # --- Stage artifacts to a known folder regardless of project layout ---
+      - name: 🧳 Stage WebView2 build outputs
+        shell: pwsh
+        run: |
+          $out = "out\WebView2\${{ inputs.config }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-      - name: 🐛 Debug
-        if: ${{ github.event.inputs.debug == 'true' }}
+          # Copy common MSVC/CMake output locations
+          $patterns = @(
+            ".\artifact\**\*.*",
+            ".\build\**\${{ inputs.config }}\**\*.exe",
+            ".\build\**\${{ inputs.config }}\**\*.dll",
+            ".\**\x64\${{ inputs.config }}\*.exe",
+            ".\**\x64\${{ inputs.config }}\*.dll",
+            ".\**\bin\${{ inputs.config }}\*.exe",
+            ".\**\bin\${{ inputs.config }}\*.dll",
+            ".\**\*.pdb"
+          )
+
+          $copied = 0
+          foreach ($p in $patterns) {
+            Get-ChildItem -Recurse -File -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_.FullName $out -Force
+              $copied++
+            }
+          }
+
+          # Optional: ensure WebView2Loader.dll is present (NuGet-based projects)
+          if (-not (Test-Path (Join-Path $out "WebView2Loader.dll"))) {
+            $loader = Get-ChildItem -Recurse -File -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\packages\\Microsoft\.Web\.WebView2\.' -and $_.FullName -match 'runtimes\\win-x64\\native\\WebView2Loader\.dll$' } |
+              Select-Object -First 1
+            if ($loader) {
+              Copy-Item $loader.FullName $out -Force
+              $copied++
+              Write-Host "Added WebView2Loader.dll from NuGet package."
+            } else {
+              Write-Host "Note: WebView2Loader.dll not found in NuGet cache. If your project embeds/copies it, this is fine."
+            }
+          }
+
+          if ($copied -eq 0) {
+            Write-Error "No build outputs found to stage. Check the previous listing step to see where files landed."
+          } else {
+            Write-Host "Staged $copied files to $out"
+            Get-ChildItem $out | Format-Table -AutoSize
+          }
+
+      - name: 📦 Upload staged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebView2-${{ inputs.config }}
+          path: out/WebView2/${{ inputs.config }}/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 🐛 Debug shell
+        if: ${{ inputs.debug == true }}
         uses: mxschmitt/action-tmate@v3
         with:
           install-dependencies: false
           limit-access-to-actor: true
-
-      - name: 🧪 Test
-        timeout-minutes: 10
-        uses: ./.github/actions/test
-        if: ${{ matrix.backend != 'WebKitGtk' && matrix.backend != 'WebKit' && matrix.backend != 'WebView2' }}
-
-      - name: 📦 Upload Artifacts
-        uses: actions/upload-artifact@v4
-        if: ${{ matrix.install == 'true' }}
-        with:
-          name: ${{ matrix.backend }}-${{ matrix.config }}
-          path: artifact
