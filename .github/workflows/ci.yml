@@ -25,7 +25,6 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # If any submodule uses git@… URLs, rewrite to HTTPS to avoid SSH key prompts
       - name: 🔁 Force submodules to HTTPS
         shell: bash
         run: |
@@ -40,7 +39,6 @@ jobs:
             git submodule update --init --recursive
           fi
 
-      # Your repo's setup action (kept, in case it prepares toolchains/SDKs)
       - name: 👽 Setup Saucer (WebView2 ${{ matrix.config }})
         uses: ./.github/actions/setup
         with:
@@ -51,66 +49,85 @@ jobs:
           xcode-version: ""
           cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
 
-      # 🔧 Explicit build (separate build dir per config to avoid generator clashes)
+      # Fresh build dir per config; request x64 VS 2022 generator
       - name: 🛠️ Configure (CMake) — ${{ matrix.config }}
         run: >
           cmake -S . -B build-wv2-${{ matrix.config }}
           -G "Visual Studio 17 2022" -A x64
           -DCMAKE_BUILD_TYPE=${{ matrix.config }}
+          -Dsaucer_backend=WebView2
           -Dsaucer_tests=OFF
           -Dsaucer_examples=ON
-          -Dsaucer_backend=WebView2
+          -DBUILD_SHARED_LIBS=ON
+          -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}\install-wv2-${{ matrix.config }}"
 
       - name: 🚀 Build (CMake) — ${{ matrix.config }}
         run: cmake --build build-wv2-${{ matrix.config }} --config ${{ matrix.config }} --parallel
 
-      # (Optional) list outputs so we can tighten globs if needed
-      - name: 📂 List outputs — ${{ matrix.config }}
+      # Try a proper 'install' first (if the project defines install() rules)
+      - name: 📦 Install (CMake) — ${{ matrix.config }}
+        run: cmake --install build-wv2-${{ matrix.config }} --config ${{ matrix.config }}
+
+      # Show what we have under the install prefix
+      - name: 📂 List installed files — ${{ matrix.config }}
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse -File -Include *.exe,*.dll,*.pdb -ErrorAction SilentlyContinue |
-            Select-Object FullName, Length | Format-Table -AutoSize
+          $inst = "install-wv2-${{ matrix.config }}"
+          if (Test-Path $inst) {
+            Write-Host "Installed tree:"
+            Get-ChildItem -Recurse -File $inst | Select-Object FullName, Length | Format-Table -AutoSize
+          } else {
+            Write-Host "No install tree found."
+          }
 
-      # Stage to a predictable folder, then upload
-      - name: 🧳 Stage WebView2 outputs — ${{ matrix.config }}
+      # Fallback: if install dir is empty or not present, stage from build tree
+      - name: 🧳 Stage outputs — ${{ matrix.config }}
         shell: pwsh
         run: |
           $cfg = "${{ matrix.config }}"
-          $build = "build-wv2-$cfg"
-          $out = "out\WebView2\$cfg"
+          $inst = "install-wv2-$cfg"
+          $out  = "out\WebView2\$cfg"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          $patterns = @(
-            "$build\**\$cfg\**\*.exe",
-            "$build\**\$cfg\**\*.dll",
-            "$build\**\*.pdb",
-            ".\artifact\**\*.*"   # in case your setup action writes here
-          )
+          $staged = 0
+          if (Test-Path $inst) {
+            $files = Get-ChildItem -Recurse -File $inst -ErrorAction SilentlyContinue
+            foreach ($f in $files) { Copy-Item $f.FullName $out -Force; $staged++ }
+          }
 
-          $copied = 0
-          foreach ($p in $patterns) {
-            Get-ChildItem -Recurse -File -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
-              Copy-Item $_.FullName $out -Force
-              $copied++
+          if ($staged -eq 0) {
+            $build = "build-wv2-$cfg"
+            $patterns = @(
+              "$build\**\$cfg\**\*.exe",
+              "$build\**\$cfg\**\*.dll",
+              "$build\**\$cfg\**\*.lib",
+              "$build\**\$cfg\**\*.exp",
+              "$build\**\*.pdb",
+              ".\artifact\**\*.*"   # in case the setup action wrote here
+            )
+            foreach ($p in $patterns) {
+              Get-ChildItem -Recurse -File -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
+                Copy-Item $_.FullName $out -Force
+                $staged++
+              }
             }
           }
 
-          # If your project doesn't auto-copy WebView2Loader.dll, try to add it from NuGet cache
+          # Add WebView2Loader.dll if the project didn't copy it already
           if (-not (Test-Path (Join-Path $out "WebView2Loader.dll"))) {
             $loader = Get-ChildItem -Recurse -File -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -match 'Microsoft\.Web\.WebView2' -and $_.FullName -match 'runtimes\\win-x64\\native\\WebView2Loader\.dll$' } |
               Select-Object -First 1
-            if ($loader) { Copy-Item $loader.FullName $out -Force; $copied++ }
+            if ($loader) { Copy-Item $loader.FullName $out -Force; $staged++ }
           }
 
-          if ($copied -eq 0) {
-            Write-Error "No build outputs found to stage for $cfg. Check the 'List outputs' step above to adjust paths."
-          } else {
-            Write-Host "Staged $copied files to $out"
+          if ($staged -eq 0) { Write-Error "Nothing to package for $cfg. Check previous steps for where files landed." }
+          else {
+            Write-Host "Staged $staged files to $out"
             Get-ChildItem $out | Format-Table -AutoSize
           }
 
-      - name: 📦 Upload artifacts — ${{ matrix.config }}
+      - name: ⬆️ Upload artifacts — ${{ matrix.config }}
         uses: actions/upload-artifact@v4
         with:
           name: WebView2-${{ matrix.config }}
