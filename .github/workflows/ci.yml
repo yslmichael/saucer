@@ -1,22 +1,21 @@
-name: 🛸 WebView2 Build Only
+name: 🛸 WebView2 Build (Release + Debug)
 
 on:
   workflow_dispatch:
     inputs:
-      config:
-        type: choice
-        description: Build configuration
-        options: [Release, Debug]
-        default: Release
       debug:
         type: boolean
-        description: Enable Debugging
+        description: Enable Debugging shell (tmate)
         default: false
 
 jobs:
   webview2:
-    name: WebView2-${{ inputs.config }}
+    name: WebView2-${{ matrix.config }}
     runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Release, Debug]
 
     steps:
       - name: 📥 Checkout (HTTPS + submodules)
@@ -40,18 +39,18 @@ jobs:
             git submodule update --init --recursive
           fi
 
-      - name: 👽 Setup Saucer (WebView2)
+      - name: 👽 Setup Saucer (WebView2 ${{ matrix.config }})
         uses: ./.github/actions/setup
         with:
           backend: WebView2
           platform: Windows
-          build-type: ${{ inputs.config }}
+          build-type: ${{ matrix.config }}
           install: true
           xcode-version: ""
           cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
 
-      # --- Diagnostics: show where the build actually wrote files ---
-      - name: 📂 List likely outputs (exe/dll/pdb)
+      # --- Diagnostics: list outputs for this config ---
+      - name: 📂 List likely outputs (exe/dll/pdb) — ${{ matrix.config }}
         shell: pwsh
         run: |
           Write-Host "Workspace: $PWD"
@@ -59,22 +58,22 @@ jobs:
             -ErrorAction SilentlyContinue | `
             Select-Object FullName, Length | Format-Table -AutoSize
 
-      # --- Stage artifacts to a known folder regardless of project layout ---
-      - name: 🧳 Stage WebView2 build outputs
+      # --- Stage artifacts for this config ---
+      - name: 🧳 Stage WebView2 build outputs — ${{ matrix.config }}
         shell: pwsh
         run: |
-          $out = "out\WebView2\${{ inputs.config }}"
+          $cfg = "${{ matrix.config }}"
+          $out = "out\WebView2\$cfg"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
-          # Copy common MSVC/CMake output locations
           $patterns = @(
             ".\artifact\**\*.*",
-            ".\build\**\${{ inputs.config }}\**\*.exe",
-            ".\build\**\${{ inputs.config }}\**\*.dll",
-            ".\**\x64\${{ inputs.config }}\*.exe",
-            ".\**\x64\${{ inputs.config }}\*.dll",
-            ".\**\bin\${{ inputs.config }}\*.exe",
-            ".\**\bin\${{ inputs.config }}\*.dll",
+            ".\build\**\$cfg\**\*.exe",
+            ".\build\**\$cfg\**\*.dll",
+            ".\**\x64\$cfg\*.exe",
+            ".\**\x64\$cfg\*.dll",
+            ".\**\bin\$cfg\*.exe",
+            ".\**\bin\$cfg\*.dll",
             ".\**\*.pdb"
           )
 
@@ -86,7 +85,7 @@ jobs:
             }
           }
 
-          # Optional: ensure WebView2Loader.dll is present (NuGet-based projects)
+          # Optional: ensure WebView2Loader.dll is present
           if (-not (Test-Path (Join-Path $out "WebView2Loader.dll"))) {
             $loader = Get-ChildItem -Recurse -File -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -match '\\packages\\Microsoft\.Web\.WebView2\.' -and $_.FullName -match 'runtimes\\win-x64\\native\\WebView2Loader\.dll$' } |
@@ -95,23 +94,21 @@ jobs:
               Copy-Item $loader.FullName $out -Force
               $copied++
               Write-Host "Added WebView2Loader.dll from NuGet package."
-            } else {
-              Write-Host "Note: WebView2Loader.dll not found in NuGet cache. If your project embeds/copies it, this is fine."
             }
           }
 
           if ($copied -eq 0) {
-            Write-Error "No build outputs found to stage. Check the previous listing step to see where files landed."
+            Write-Error "No build outputs found to stage for $cfg. Check the listing step above for actual paths."
           } else {
             Write-Host "Staged $copied files to $out"
             Get-ChildItem $out | Format-Table -AutoSize
           }
 
-      - name: 📦 Upload staged artifacts
+      - name: 📦 Upload staged artifacts — ${{ matrix.config }}
         uses: actions/upload-artifact@v4
         with:
-          name: WebView2-${{ inputs.config }}
-          path: out/WebView2/${{ inputs.config }}/**
+          name: WebView2-${{ matrix.config }}
+          path: out/WebView2/${{ matrix.config }}/**
           if-no-files-found: error
           retention-days: 14
 
