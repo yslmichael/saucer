@@ -16,7 +16,8 @@ on:
 jobs:
   webview2:
     name: WebView2-${{ inputs.config }}
-    runs-on: windows-2022   # pin to avoid runner migration surprises
+    runs-on: windows-2022
+
     steps:
       - name: 📥 Checkout (HTTPS + submodules)
         uses: actions/checkout@v4
@@ -25,7 +26,6 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      # If any submodule URLs are git@github.com:..., rewrite to HTTPS so no SSH keys are needed
       - name: 🔁 Force submodules to HTTPS
         shell: bash
         run: |
@@ -45,11 +45,75 @@ jobs:
         with:
           backend: WebView2
           platform: Windows
-          os: windows-2022
           build-type: ${{ inputs.config }}
-          install: true                   # <-- ensure artifacts step is enabled
+          install: true
           xcode-version: ""
           cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
+
+      # --- Diagnostics: show where the build actually wrote files ---
+      - name: 📂 List likely outputs (exe/dll/pdb)
+        shell: pwsh
+        run: |
+          Write-Host "Workspace: $PWD"
+          Get-ChildItem -Recurse -File -Include *.exe,*.dll,*.pdb `
+            -ErrorAction SilentlyContinue | `
+            Select-Object FullName, Length | Format-Table -AutoSize
+
+      # --- Stage artifacts to a known folder regardless of project layout ---
+      - name: 🧳 Stage WebView2 build outputs
+        shell: pwsh
+        run: |
+          $out = "out\WebView2\${{ inputs.config }}"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          # Copy common MSVC/CMake output locations
+          $patterns = @(
+            ".\artifact\**\*.*",
+            ".\build\**\${{ inputs.config }}\**\*.exe",
+            ".\build\**\${{ inputs.config }}\**\*.dll",
+            ".\**\x64\${{ inputs.config }}\*.exe",
+            ".\**\x64\${{ inputs.config }}\*.dll",
+            ".\**\bin\${{ inputs.config }}\*.exe",
+            ".\**\bin\${{ inputs.config }}\*.dll",
+            ".\**\*.pdb"
+          )
+
+          $copied = 0
+          foreach ($p in $patterns) {
+            Get-ChildItem -Recurse -File -Path $p -ErrorAction SilentlyContinue | ForEach-Object {
+              Copy-Item $_.FullName $out -Force
+              $copied++
+            }
+          }
+
+          # Optional: ensure WebView2Loader.dll is present (NuGet-based projects)
+          if (-not (Test-Path (Join-Path $out "WebView2Loader.dll"))) {
+            $loader = Get-ChildItem -Recurse -File -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\packages\\Microsoft\.Web\.WebView2\.' -and $_.FullName -match 'runtimes\\win-x64\\native\\WebView2Loader\.dll$' } |
+              Select-Object -First 1
+            if ($loader) {
+              Copy-Item $loader.FullName $out -Force
+              $copied++
+              Write-Host "Added WebView2Loader.dll from NuGet package."
+            } else {
+              Write-Host "Note: WebView2Loader.dll not found in NuGet cache. If your project embeds/copies it, this is fine."
+            }
+          }
+
+          if ($copied -eq 0) {
+            Write-Error "No build outputs found to stage. Check the previous listing step to see where files landed."
+          } else {
+            Write-Host "Staged $copied files to $out"
+            Get-ChildItem $out | Format-Table -AutoSize
+          }
+
+      - name: 📦 Upload staged artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebView2-${{ inputs.config }}
+          path: out/WebView2/${{ inputs.config }}/**
+          if-no-files-found: error
+          retention-days: 14
 
       - name: 🐛 Debug shell
         if: ${{ inputs.debug == true }}
@@ -57,17 +121,3 @@ jobs:
         with:
           install-dependencies: false
           limit-access-to-actor: true
-
-      # Skip the repo's generic "Test" action; WebView2 doesn’t run tests there.
-      # Ensure something actually gets uploaded.
-      - name: 📦 Upload Artifacts (WebView2)
-        uses: actions/upload-artifact@v4
-        with:
-          name: WebView2-${{ inputs.config }}
-          path: |
-            artifact/**
-            build/**/bin/${{ inputs.config }}/**/*.exe
-            build/**/${{ inputs.config }}/**/*.dll
-            **/x64/${{ inputs.config }}/*.exe
-            **/x64/${{ inputs.config }}/*.dll
-          retention-days: 14
