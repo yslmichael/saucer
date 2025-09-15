@@ -1,4 +1,4 @@
-name: 🛸 WebView2 Build (Release + Debug)
+name: 🛸 WebView2 — Release & Debug
 
 on:
   workflow_dispatch:
@@ -25,6 +25,7 @@ jobs:
           submodules: recursive
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # If any submodule uses git@… URLs, rewrite to HTTPS to avoid SSH key prompts
       - name: 🔁 Force submodules to HTTPS
         shell: bash
         run: |
@@ -39,6 +40,7 @@ jobs:
             git submodule update --init --recursive
           fi
 
+      # Your repo's setup action (kept, in case it prepares toolchains/SDKs)
       - name: 👽 Setup Saucer (WebView2 ${{ matrix.config }})
         uses: ./.github/actions/setup
         with:
@@ -49,43 +51,40 @@ jobs:
           xcode-version: ""
           cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
 
-      # 🔧 Actually build (setup only preps env; this compiles)
-      - name: 🛠️ Configure (CMake)
+      # 🔧 Explicit build (separate build dir per config to avoid generator clashes)
+      - name: 🛠️ Configure (CMake) — ${{ matrix.config }}
         run: >
-          cmake -S . -B build -A x64
+          cmake -S . -B build-wv2-${{ matrix.config }}
+          -G "Visual Studio 17 2022" -A x64
           -DCMAKE_BUILD_TYPE=${{ matrix.config }}
           -Dsaucer_tests=OFF
           -Dsaucer_examples=ON
           -Dsaucer_backend=WebView2
 
-      - name: 🚀 Build (CMake)
-        run: cmake --build build --config ${{ matrix.config }} --parallel
+      - name: 🚀 Build (CMake) — ${{ matrix.config }}
+        run: cmake --build build-wv2-${{ matrix.config }} --config ${{ matrix.config }} --parallel
 
-      # Diagnostics so we can see where outputs landed
-      - name: 📂 List likely outputs (exe/dll/pdb) — ${{ matrix.config }}
+      # (Optional) list outputs so we can tighten globs if needed
+      - name: 📂 List outputs — ${{ matrix.config }}
         shell: pwsh
         run: |
-          Write-Host "Workspace: $PWD"
           Get-ChildItem -Recurse -File -Include *.exe,*.dll,*.pdb -ErrorAction SilentlyContinue |
             Select-Object FullName, Length | Format-Table -AutoSize
 
-      # Stage everything to a known folder and ensure WebView2Loader.dll is present if available
+      # Stage to a predictable folder, then upload
       - name: 🧳 Stage WebView2 outputs — ${{ matrix.config }}
         shell: pwsh
         run: |
           $cfg = "${{ matrix.config }}"
+          $build = "build-wv2-$cfg"
           $out = "out\WebView2\$cfg"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
 
           $patterns = @(
-            ".\artifact\**\*.*",                   # if your setup action used this
-            ".\build\**\$cfg\**\*.exe",
-            ".\build\**\$cfg\**\*.dll",
-            ".\**\x64\$cfg\*.exe",
-            ".\**\x64\$cfg\*.dll",
-            ".\**\bin\$cfg\*.exe",
-            ".\**\bin\$cfg\*.dll",
-            ".\**\*.pdb"
+            "$build\**\$cfg\**\*.exe",
+            "$build\**\$cfg\**\*.dll",
+            "$build\**\*.pdb",
+            ".\artifact\**\*.*"   # in case your setup action writes here
           )
 
           $copied = 0
@@ -96,6 +95,7 @@ jobs:
             }
           }
 
+          # If your project doesn't auto-copy WebView2Loader.dll, try to add it from NuGet cache
           if (-not (Test-Path (Join-Path $out "WebView2Loader.dll"))) {
             $loader = Get-ChildItem -Recurse -File -Filter WebView2Loader.dll -ErrorAction SilentlyContinue |
               Where-Object { $_.FullName -match 'Microsoft\.Web\.WebView2' -and $_.FullName -match 'runtimes\\win-x64\\native\\WebView2Loader\.dll$' } |
@@ -104,13 +104,13 @@ jobs:
           }
 
           if ($copied -eq 0) {
-            Write-Error "No build outputs found to stage for $cfg. Check the listing step above for actual paths."
+            Write-Error "No build outputs found to stage for $cfg. Check the 'List outputs' step above to adjust paths."
           } else {
             Write-Host "Staged $copied files to $out"
             Get-ChildItem $out | Format-Table -AutoSize
           }
 
-      - name: 📦 Upload staged artifacts — ${{ matrix.config }}
+      - name: 📦 Upload artifacts — ${{ matrix.config }}
         uses: actions/upload-artifact@v4
         with:
           name: WebView2-${{ matrix.config }}
