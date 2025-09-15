@@ -45,6 +45,7 @@ jobs:
         with:
           backend: WebView2
           platform: Windows
+          os: windows-2022
           build-type: ${{ inputs.config }}
           install: true                   # <-- ensure artifacts step is enabled
           xcode-version: ""
