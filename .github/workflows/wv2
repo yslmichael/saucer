@@ -1,0 +1,72 @@
+name: 🛸 WebView2 Build Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        type: choice
+        description: Build configuration
+        options: [Release, Debug]
+        default: Release
+      debug:
+        type: boolean
+        description: Enable Debugging
+        default: false
+
+jobs:
+  webview2:
+    name: WebView2-${{ inputs.config }}
+    runs-on: windows-2022   # pin to avoid runner migration surprises
+    steps:
+      - name: 📥 Checkout (HTTPS + submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # If any submodule URLs are git@github.com:..., rewrite to HTTPS so no SSH keys are needed
+      - name: 🔁 Force submodules to HTTPS
+        shell: bash
+        run: |
+          if [ -f .gitmodules ]; then
+            git config -f .gitmodules --get-regexp '^submodule\..*\.url$' | while read -r key url; do
+              if [[ "$url" =~ ^git@github\.com: ]]; then
+                https_url="https://github.com/${url#git@github.com:}"
+                git config -f .gitmodules "$key" "$https_url"
+              fi
+            done
+            git submodule sync --recursive
+            git submodule update --init --recursive
+          fi
+
+      - name: 👽 Setup Saucer (WebView2)
+        uses: ./.github/actions/setup
+        with:
+          backend: WebView2
+          platform: Windows
+          build-type: ${{ inputs.config }}
+          install: true                   # <-- ensure artifacts step is enabled
+          xcode-version: ""
+          cmake-args: -Dsaucer_tests=OFF -Dsaucer_examples=ON
+
+      - name: 🐛 Debug shell
+        if: ${{ inputs.debug == true }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          install-dependencies: false
+          limit-access-to-actor: true
+
+      # Skip the repo's generic "Test" action; WebView2 doesn’t run tests there.
+      # Ensure something actually gets uploaded.
+      - name: 📦 Upload Artifacts (WebView2)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebView2-${{ inputs.config }}
+          path: |
+            artifact/**
+            build/**/bin/${{ inputs.config }}/**/*.exe
+            build/**/${{ inputs.config }}/**/*.dll
+            **/x64/${{ inputs.config }}/*.exe
+            **/x64/${{ inputs.config }}/*.dll
+          retention-days: 14
